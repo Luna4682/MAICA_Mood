@@ -636,6 +636,20 @@ def _spawn(exe, port, log_path=None):
         return None
 
 
+def extractor_bundle_present():
+    """本包是否带本地抽取器（模型 + 至少一个可执行目录）。
+
+    ★ 2026-10-24：lite 包不含 extractor\，此时抽取改走服务商（见 MAICA_Mood.rpy 的
+      _mm_sync_api_settings）。完整的 1.6 GB 包行为不变。
+    """
+    try:
+        if not os.path.isfile(extractor_model_path()):
+            return False
+        return bool(extractor_binaries())
+    except Exception:
+        return False
+
+
 def start_extractor(port=None, wait_s=20.0, log_path=None, state=None):
     """启动提取器（已在跑就直接返回 True）。返回 (是否可用, 说明)。
 
@@ -952,6 +966,9 @@ ENV_OVERRIDE_KEYS = (
     "MAICA_MVISTA_ADDR", "MAICA_MVISTA_KEY", "MAICA_MVISTA_CHOICE",
     "MAICA_MNERVE_ADDR", "MAICA_MNERVE_KEY", "MAICA_MNERVE_CHOICE",
     "MAICA_PROXY_ADDR", "MAICA_TP_APIS",
+    # ★ 2026-10-24：lite 包（无 extractor\）要把抽取指向服务商 —— 这三个必须在白名单里，
+    #   否则 set_env_overrides 会静默丢掉，.env 里仍是 127.0.0.1:8091（没有进程在听）。
+    "MAICA_EXTRACT_ADDR", "MAICA_EXTRACT_KEY", "MAICA_EXTRACT_CHOICE",
 )
 
 _ENV_OVERRIDES = {}
@@ -1810,26 +1827,34 @@ def start_service_thread(ports=None, log_paths=None, interval=1.5, retry_every=1
                         st["backend"] = "running"
                     st["backend_ready"] = backend_alive(ports["http"])
                     # ③ 提取器：按聊天生命周期启停
+                    # ★ 2026-10-24：lite 包不带 extractor\ → 不启动本地提取器，
+                    #   抽取走服务商（.env 的 MAICA_EXTRACT_* 由 MAICA_Mood.rpy 指过去）
+                    _has_local_ex = extractor_bundle_present()
                     _last = float(st.get("last_chat_at") or 0.0)
                     _idle = (now - _last) if _last else 1e9
-                    _want_ex = bool(st.get("chat_active")) and _idle <= float(extract_idle_stop)
-                    if not _want_ex:
-                        if (st["procs"] or {}).get("extractor_proc") is not None or \
-                                extractor_alive(ports["extract"]):
+                    if not _has_local_ex:
+                        if (st["procs"] or {}).get("extractor_proc") is not None:
                             stop_extractor(st["procs"])
-                            st["extract"] = "stopped(no-chat)" if not st.get("chat_active") \
-                                else "stopped(idle)"
-                        else:
-                            st["extract"] = "idle(no-chat)" if not st.get("chat_active") \
-                                else "idle(idle)"
-                    elif extractor_alive(ports["extract"]):
-                        st["extract"] = "running"
-                    elif now - tries["extract"] >= retry_every:
-                        tries["extract"] = now
-                        st["extract"] = start_extractor(
-                            port=ports["extract"], log_path=log_paths.get("extract"),
-                            state=st["procs"])[1]
-                        _after_fail("extract", st["extract"])
+                        st["extract"] = "remote(no-local-model)"
+                    else:
+                        _want_ex = bool(st.get("chat_active")) and _idle <= float(extract_idle_stop)
+                        if not _want_ex:
+                            if (st["procs"] or {}).get("extractor_proc") is not None or \
+                                    extractor_alive(ports["extract"]):
+                                stop_extractor(st["procs"])
+                                st["extract"] = "stopped(no-chat)" if not st.get("chat_active") \
+                                    else "stopped(idle)"
+                            else:
+                                st["extract"] = "idle(no-chat)" if not st.get("chat_active") \
+                                    else "idle(idle)"
+                        elif extractor_alive(ports["extract"]):
+                            st["extract"] = "running"
+                        elif now - tries["extract"] >= retry_every:
+                            tries["extract"] = now
+                            st["extract"] = start_extractor(
+                                port=ports["extract"], log_path=log_paths.get("extract"),
+                                state=st["procs"])[1]
+                            _after_fail("extract", st["extract"])
                 else:
                     if st["procs"]:
                         # wait=True：等进程真的退出、端口释放，玩家马上切回来也不撞 port-busy

@@ -1006,6 +1006,27 @@ init python:
                     st["api_tp_bad_notified"] = True
                     _mm_log("api: maica_tp_apis is not valid JSON -> ignored")
 
+        # ★ 2026-10-24：lite 包（不含 extractor\）→ 事实抽取改走核心服务商。
+        #   模板里默认是 http://127.0.0.1:{EXTRACT}/v1 + r8；这里覆盖成玩家填的服务商。
+        st.pop("extract_mode", None)
+        _mm_was_extract_remote = st.get("extract_mode_prev") == "remote"
+        try:
+            _mm_has_local_extract = store.maica_mood.extractor_bundle_present()
+        except Exception:
+            _mm_has_local_extract = True
+        if not _mm_has_local_extract:
+            st["extract_mode"] = "remote"
+            for _dst, _src in (("MAICA_EXTRACT_ADDR", "MAICA_MCORE_ADDR"),
+                               ("MAICA_EXTRACT_KEY", "MAICA_MCORE_KEY"),
+                               ("MAICA_EXTRACT_CHOICE", "MAICA_MCORE_CHOICE")):
+                if raw.get(_src):
+                    raw[_dst] = raw[_src]
+            # 这个函数每个 tick 都跑 —— 只在"刚切成远端"时记一行，否则日志会被刷爆
+            if not _mm_was_extract_remote:
+                _mm_log("extract: no local bundle -> using provider (%s)" %
+                        (raw.get("MAICA_EXTRACT_CHOICE") or "?"))
+        st["extract_mode_prev"] = st.get("extract_mode")
+
         try:
             applied = store.maica_mood.set_env_overrides(raw)
         except Exception:
@@ -1409,6 +1430,8 @@ screen maica_mood_settings():
         null height 2
         for _mm_api_help_line in store._MM_API_HELP:
             text _mm_api_help_line size 13 color "#ffffff80"
+        if store._mm_state.get("extract_mode") == "remote":
+            text u"事实抽取：使用你填的服务商（本包未附带本地模型，每次对话会多一次很小的 API 请求）" size 13 color "#ffc46b"
         null height 4
 
         text u"问卷与记忆（在浏览器里操作，保存后进聊天会自动记进她的记忆）" size 15 color "#ffffff90"
