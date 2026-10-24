@@ -1,0 +1,13 @@
+{
+  "_readme": "事实库的硬规则（配置外置，改完保存即生效，不需要改代码）。",
+  "_readme_discard_exact": "【整句】完全等于其中一项时才丢弃。绝不要在这里写子串——那会误杀正常内容。",
+  "_readme_discard_max_chars": "整句只剩语气词、且长度不超过这个数时丢弃。",
+  "_readme_source_priority": "来源优先级，越靠前越高。裁决时先用它，同源再看更新时间。",
+  "discard_exact": [
+    "你好", "您好", "在吗", "在么", "早", "早安", "晚安", "下午好", "晚上好",
+    "哈哈", "哈哈哈", "呵呵", "嗯", "哦", "噢", "啊", "呃", "额",
+    "好", "好的", "行", "是的", "对", "是", "谢谢", "谢了"
+  ],
+  "discard_max_chars": 8,
+  "source_priority": ["player_direct", "savefile_field", "savefile_derived", "knowledge"]
+}

@@ -1,0 +1,1447 @@
+"""Import layer 1"""
+import logging
+import asyncio
+import httpx
+import aiomysql
+import openai
+import functools
+import hashlib
+import os
+import re
+import ast
+import json
+import inspect
+import platform
+import colorama
+import time
+import datetime
+import random
+import traceback
+import websockets
+
+from typing import *
+from tenacity import *
+from pydantic import BaseModel, model_validator, TypeAdapter, ValidationError
+from pydantic_core import core_schema
+from pydantic.dataclasses import dataclass as pdataclass
+from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from openai.types.chat import ChatCompletionMessage
+from typing_extensions import deprecated
+from urllib.parse import urlparse
+from .locater import *
+from .gvars import *
+
+_READ_KWDS = {'select', 'show', 'explain', 'describe'}
+_WRITE_KWDS = {
+'insert', 'update', 'delete', 'create', 'alter', 
+'drop', 'truncate', 'replace', 'merge'
+}
+
+colorama.init(autoreset=True)
+
+logger = logging.getLogger('maica')
+logger.setLevel(logging.DEBUG)
+
+if not logger.handlers:
+    # To prevent this executing twice
+
+    main_handler = logging.StreamHandler(sys.stdout)
+    main_handler.setLevel(logging.DEBUG)
+    main_handler.addFilter(lambda record: record.levelno <= logging.WARNING)
+    err_handler = logging.StreamHandler(sys.stderr)
+    err_handler.setLevel(logging.ERROR)
+
+    logger.addHandler(main_handler)
+    logger.addHandler(err_handler)
+
+def silent(tf: bool=True) -> None:
+    global _silent, logger
+    _silent = tf
+_silent = False
+
+class _lmlogger():
+    """
+    Python logging does not support stream output, so I made this.
+    Redirect 'stream-maica' output to log file if needed.
+    """
+    def __init__(self, name='stream-maica'):
+        self._logger = logging.getLogger(name)
+        self._logger.setLevel(logging.DEBUG)
+        self._buffer = ''
+    
+    def buff(self, text):
+        self._buffer += text
+
+    def flush(self):
+        self._logger.info(self._buffer)
+        self._buffer = ''
+
+lmlogger = _lmlogger()
+
+type TargetLangType = Literal['zh', 'en', 'auto']
+
+class MsgType():
+    """For convenience."""
+    PLAIN = 'plain'
+    CARRIAGE = 'carriage'
+    DEBUG = 'debug'
+    INFO = 'info'
+    LOG = 'log'
+    PRIM_LOG = 'prim_log'
+    SYS = 'sys'
+    PRIM_SYS = 'prim_sys'
+    RECV = 'recv'
+    PRIM_RECV = 'prim_recv'
+    WARN = 'warn'
+    ERROR = 'error'
+
+class FakeChatCompletion():
+    """
+    A fake OpenAI completion class. Do not use for context.
+    Be cautious that this class simulates Response instead of ChatCompletion since v1.3.
+    """
+    def __init__(self, text):
+        self.output_text = text
+        self.output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text
+                    }
+                ]
+            }
+        ]
+
+class CommonMaicaException(Exception):
+    """This is a common MAICA exception."""
+    def __init__(self, message=None, error_code=None, status=None, send=None, print=None):
+        """For send and print, None means default, not False."""
+        super().__init__(message)
+        self.message, self.error_code, self.status, self.send, self.print = message, error_code, status, send, print
+
+    @property
+    def is_critical(self):
+        return int(self.error_code) >= 500
+    @property
+    def is_breaking(self):
+        return True
+    
+class CommonMaicaError(CommonMaicaException):
+    """This is a common MAICA error."""
+    def __init__(self, message=None, error_code=500, status='maica_unified_error', send=None, print=None):
+        super().__init__(message, error_code, status, send, print)
+    
+class CommonMaicaWarning(CommonMaicaException):
+    """This is a common MAICA warning."""
+    def __init__(self, message=None, error_code=400, status='maica_unified_warning', send=None, print=None):
+        super().__init__(message, error_code, status, send, print)
+
+    @property
+    def is_breaking(self):
+        return False
+
+class CriticalMaicaError(CommonMaicaError):
+    """This is an unrecoverable exception, we should terminate the connection and possibly the entire process."""
+
+class MaicaPermissionError(CommonMaicaError):
+    """This suggests the user is accessing without correct permissions."""
+
+class MaicaInputError(CommonMaicaError):
+    """This suggests the input appears to be an impossible value, which is a more severe case than warning."""
+
+class MaicaResponseError(CommonMaicaError):
+    """This suggests the output is somewhat unexpected, we should terminate the connection and possibly the entire process."""
+
+class MaicaDbError(CommonMaicaError):
+    """This suggests the DB query gave an unexpected result, we should terminate the connection and possibly the entire process."""
+
+class MaicaPermissionWarning(CommonMaicaWarning):
+    """This suggests the user is accessing without correct permissions, but we don't break the connection for convenience of retrying."""
+
+class MaicaInputWarning(CommonMaicaWarning):
+    """This suggests the input is not processable."""
+
+class MaicaDbWarning(CommonMaicaWarning):
+    """This suggests the DB query gave an warning."""
+
+class MaicaConnectionWarning(CommonMaicaWarning):
+    """This suggests the connection is not behaving normal."""
+
+class MaicaInternetWarning(CommonMaicaWarning):
+    """This suggests the backend request action is not behaving normal."""
+
+class MaicaResponseWarning(CommonMaicaWarning):
+    """This suggests the output is malformed."""
+
+RETRYABLE_EXCEPTIONS = (
+    aiomysql.OperationalError,
+    aiomysql.InterfaceError,
+    ConnectionError,
+    TimeoutError,
+    httpx.TransportError,
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.RateLimitError,
+    openai.InternalServerError,
+)
+
+class AsyncCreator(ABC):
+    """Inherit this for async init."""
+    @abstractmethod
+    async def _ainit(self):
+        """Placeholder."""
+
+    @classmethod
+    async def async_create(cls, *args, **kwargs):
+        instance = cls(*args, **kwargs)
+        await instance._ainit()
+        return instance
+
+class LimitedList(list):
+    """Might not have applied to all functionalities!"""
+    def __init__(self, max_size, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+        
+        while len(self) > self.max_size:
+            self.pop(0)
+
+    @property
+    def list(self):
+        while len(self) > self.max_size:
+            self.pop(0)
+        return list(self)
+
+    def append(self, item):
+        if len(self) >= self.max_size:
+            self.pop(0)
+        super().append(item)
+    
+    def extend(self, iterable):
+        for item in iterable:
+            self.append(item)
+    
+    def insert(self, index, item):
+        if len(self) >= self.max_size:
+            self.pop(0)
+        super().insert(index, item)
+    
+    def __repr__(self):
+        return f"LimitedList(max_size={self.max_size}, {super().__repr__()})"
+    
+@deprecated("Just use a tuple instead")
+class LoginResult():
+    """
+    A packed login result.
+    This does not contain ban status. Check independently.
+    """
+    user_id = None
+    username = None
+    nickname = None
+    email = None
+    is_verified = None
+    message = None
+    def __init__(self, **kwargs):
+        for priokey in ['user_id', 'username', 'nickname', 'email']:
+            setattr(self, priokey, kwargs.get(priokey))
+        if kwargs.get('is_verified'):
+            if not (self.user_id and self.username and self.email):
+                raise ValueError("Verification essentials incomplete")
+        for key in ['is_verified', 'message']:
+            setattr(self, key, kwargs.get(key))
+
+    def __call__(self):
+        d = {}
+        for key in ['user_id', 'username', 'nickname', 'email', 'is_verified', 'message']:
+            d[key] = getattr(self, key)
+        return d
+
+class Combiner():
+    """For performance since GPT says string adding is not good."""
+    def __init__(self, pre_str='', splitter=', '):
+        self.str_buffer = pre_str
+        self.dyn_buffer = []
+        self.splitter = splitter
+
+    def append(self, item):
+        self.dyn_buffer.append(item)
+
+    def extend(self, items):
+        self.dyn_buffer.extend(items)
+
+    def _migrate(self):
+        ext_str = self.splitter.join(self.dyn_buffer)
+        if self.str_buffer:
+            self.str_buffer += self.splitter
+        self.str_buffer += ext_str
+        self.dyn_buffer.clear()
+
+    def to_text(self):
+        self._migrate()
+        return self.str_buffer
+
+class ReUtils():
+    """Just a collection."""
+    IS = re.I | re.S
+    re_sub_password_spoiler = re.compile(r'"password"\s*:\s*"(.*?)"')
+    re_search_sfe_fs = re.compile(r"first_session.*?datetime\(([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\)", re.I)
+    re_search_sfe_ts = re.compile(r"total_sessions.*?([0-9]*)\s?,", re.I)
+    re_search_sfe_tp = re.compile(r"total_playtime.*?([0-9]*)\s?,", re.I)
+    re_search_sfe_le = re.compile(r"last_session_end.*?datetime\(([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\)", re.I)
+    re_search_sfe_cs = re.compile(r"current_session_start.*?datetime\(([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\s*,\s*([0-9]*?)\)", re.I)
+    re_search_sfe_unicode = re.compile(r"u'(.*)'")
+    re_search_post_think = re.compile(r'</think>[\s\n]*(.*)$', re.S)
+    re_search_answer_none = re.compile(r'[\s\n:]*none[\s\n.]*$', re.I)
+    re_search_answer_json = re.compile(r'^.*?([{\[].*[}\]])', re.S)
+    re_sub_player_name = re.compile(r'\[player\]')
+    re_match_time_acquire = re.compile(r'.*time.*acquire', IS)
+    re_match_date_acquire = re.compile(r'.*date.*acquire', IS)
+    re_match_weather_acquire = re.compile(r'.*weather.*acquire', IS)
+    re_match_event_acquire = re.compile(r'.*event.*acquire', IS)
+    re_match_persistent_acquire = re.compile(r'.*persistent.*acquire', IS)
+    re_match_search_internet = re.compile(r'.*search.*internet', IS)
+    re_match_react_trigger = re.compile(r'.*react.*trigger', IS)
+    re_match_conclude_information = re.compile(r'.*conclude.*information', IS)
+    re_match_none = re.compile(r'.*none', IS)
+    re_findall_quoted = re.compile(r'"(.*?)"') # Normally we request JSON so we consider double quotes only
+    re_search_location_prompt = re.compile(r'(地区|周边|附近|周围|nearby|local)', re.I)
+    re_search_location_related = re.compile(r'(天气|温度|路况|降雨|weather|traffic|temperature|rain)', re.I)
+    re_search_host_addr = re.compile(r"^https?://(.*?)(:|/|$).*", re.I)
+    re_sub_capt_status = re.compile(r"(_|^)([A-Za-z])")
+    re_findall_square_marks = re.compile(r'\[(?:(?:[A-Za-z ]{1,15}?)|(?:[一-龥 ]{1,4}?))\]')
+    re_findall_square_brackets = re.compile(r'(\[.*?\])')
+    re_sub_sqlite_escape = re.compile(r'%s')
+    re_sub_replacement_chr = re.compile(r'[\uFFF9-\uFFFF]')
+    re_sub_serp_datetime = re.compile(r'.{1,10}?,.{1,10}?-\s*')
+    re_sub_clear_text = re.compile(r'^[\n\s]*(.*?)[\n\s]*$', re.S)
+    re_match_secure_path = re.compile(r'^[a-zA-Z0-9_.-]+$')
+    re_search_wiki_avoid = re.compile(r"(模板|模闆|template|消歧义|消歧義|disambiguation)", re.I)
+    re_search_type_sping = re.compile(r'"type"\s*?:\s*?"sping"', re.I)
+    re_findall_zh_characters = re.compile(r'([一-龥].*[一-龥])')
+    re_sub_multi_spaces = re.compile(r'\s{2,}')
+    re_sub_ellipsis = re.compile(r'\.\.\.')
+    re_sub_strip_spaces = re.compile(r"\s*(.*?)\s*$", re.M)
+
+class Decos():
+    """Do not initialize."""
+    def conn_retryer_factory(
+        max_attempts: int=4,
+        min_wait: float=1,
+        max_wait: float=10,
+        retry_exceptions=RETRYABLE_EXCEPTIONS,
+    ):
+        """Mostly for instance methods."""
+        async def log_retry(retry_state):
+            e = retry_state.outcome.exception()
+            sync_messenger(info=f"Connection temporarily failed: {str(e)}", type=MsgType.WARN)
+
+        retry_decorator = retry(
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
+            retry=retry_if_exception_type(retry_exceptions),
+            before_sleep=log_retry,
+            reraise=True,
+        )
+
+        def decorator(func):
+            @functools.wraps(func)
+            @retry_decorator
+            async def wrapper(self, *args, **kwargs):
+                return await func(self, *args, **kwargs)
+            return wrapper
+        return decorator
+
+    def log_task(func):
+        """Every~time you call my name~~~"""
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            func_name = func.__name__
+            sync_messenger(info=f"Running task {func_name} now", type=MsgType.PRIM_SYS)
+            result = await func(*args, **kwargs)
+            sync_messenger(info=f"Task {func_name} finished", type=MsgType.DEBUG)
+            return result
+        return wrapper
+
+class ExplainUrl():
+    """For convenience."""
+    def __init__(self, url):
+        parse_result = urlparse(url)
+        self.scheme = parse_result.scheme
+        self.netloc = parse_result.netloc
+        self.path = parse_result.path
+        self.params = parse_result.params
+        self.query = parse_result.query
+        self.fragment = parse_result.fragment
+        self.hostname, self.port = parse_result.hostname, parse_result.port
+        self.is_url = bool(self.netloc)
+        self.is_local = not self.is_url
+        if not self.port:
+            match self.scheme:
+                case "http":
+                    self.port = 80
+                case "https":
+                    self.port = 443
+                case "ftp":
+                    self.port = 21
+                case "ssh":
+                    self.port = 22
+
+@pdataclass
+class BilingualText():
+    """Should we call it trilingual?"""
+    zh: str = ""
+    en: Optional[str] = None
+    auto: Optional[str] = None
+
+    @model_validator(mode="after")
+    def auto_fill(self):
+        if self.en is None:
+            self.en = self.zh
+        if self.auto is None:
+            self.auto = self.en
+
+        return self
+
+    def __bool__(self):
+        return bool(self.zh or self.en or self.auto)
+
+    def __str__(self):
+        return self.zh
+    
+    def __add__(self, other):
+        if isinstance(other, str):
+            return self.__class__(
+                zh = self.zh + other,
+                en = self.en + other,
+                auto = self.auto + other,
+            )
+        else:
+            return self.__class__(
+                zh = self.zh + other.zh,
+                en = self.en + other.en,
+                auto = self.auto + other.auto,
+            )
+    
+    def __iadd__(self, other):
+        if isinstance(other, str):
+            self.zh += other
+            self.en += other
+            self.auto += other
+        else:
+            self.zh += other.zh
+            self.en += other.en
+            self.auto += other.auto
+        return self
+    
+    def to_str(self, target_lang: TargetLangType='zh') -> str:
+        if target_lang == 'zh':
+            return self.zh
+        elif target_lang == 'en':
+            return self.en
+        else:
+            return self.auto
+
+    def as_str(self, func: Callable, *args, self_assign=False, **kwargs):
+        """Treat current bt as multiple strings."""
+        results = []
+        for i in (self.zh, self.en, self.auto):
+            results.append(func(*args, **kwargs))
+        results = tuple(results)
+
+        if self_assign:
+            self.zh, self.en, self.auto = results
+        
+        return results
+
+class PydUpdateMixin(BaseModel):
+    """This adds update() method to pydantic models."""
+    def update(self, m):
+        """Updating from a dict, a pydantic object, or something alike."""
+        if isinstance(m, BaseModel):
+            m = m.model_dump()
+
+        updated = set()
+        for k, v in m.items():
+            if k in self.__class__.model_fields:
+                setattr(self, k, v)
+                updated.add(k)
+        return updated
+
+class PydHardResetMixin(BaseModel):
+    """This adds reset() method to pydantic models (id/vfc)."""
+    def reset(self):
+        """Hard reset all id/vfc values to default."""
+        _crd_fields = ('_user_id', '_username', '_nickname', '_email')
+        for f in _crd_fields:
+            if hasattr(self, f):
+                setattr(self, f, None)
+
+class PydSoftResetMixin(BaseModel):
+    """This adds reset() method to pydantic models (norm)."""
+    def reset(self):
+        for k, v in self.__class__.model_fields.items():
+            setattr(self, k, v.get_default(call_default_factory=True))
+        self.model_fields_set.clear()
+
+class RobustList[T](list[T]):
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        item_type = get_args(source_type)[0]
+        item_adapter = TypeAdapter(item_type)
+
+        list_schema = handler.generate_schema(list[item_type])
+
+        def filter_before(value: Any):
+            if not isinstance(value, list):
+                return value
+
+            filtered = []
+
+            for item in value:
+                try:
+                    filtered.append(item_adapter.validate_python(item))
+                except ValidationError:
+                    pass
+
+            return filtered
+
+        return core_schema.no_info_before_validator_function(
+            filter_before,
+            list_schema,
+        )
+
+
+class SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+_PROMPT_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
+
+
+def replace_prompt_placeholders(text: str, values: Mapping[str, object]) -> str:
+    """Replace known simple placeholders without parsing arbitrary brace content."""
+    return _PROMPT_PLACEHOLDER_RE.sub(
+        lambda match: str(values[match.group(1)])
+        if match.group(1) in values else match.group(0),
+        text,
+    )
+
+
+class GenCorrectionModel(BaseModel):
+    """
+    Pydantic model with lightweight JSON output repair. GPT wrote this.
+
+    Intended for LLM generated JSON where formatting may be slightly invalid.
+    """
+
+    _default_resp: ClassVar[Optional[dict]] = None
+
+    @classmethod
+    def model_validate_json[T](
+        cls: type[T],
+        json_data: str | bytes,
+        *,
+        strict: bool | None = None,
+        **kwargs: Any,
+    ) -> T:
+        """
+        Try normal validation first.
+        If failed, apply conservative JSON repairs.
+        """
+
+        try:
+            import maica.maica_utils.debug_log as _dl
+            _dl.dbg("SCHEMA", "validate cls=%s" % cls.__name__, raw=json_data)
+        except Exception:
+            pass
+
+        try:
+            return super().model_validate_json(
+                json_data,
+                **kwargs,
+            )
+
+        except ValidationError as ve:
+            sync_messenger(info=f"Validation failed for LLM response: {str(ve)}, trying basic fixes", type=MsgType.DEBUG)
+            
+            try:
+                repaired = cls._repair_json(json_data)
+                try:
+                    import maica.maica_utils.debug_log as _dl
+                    _dl.dbg("SCHEMA-FIX", "repaired-json cls=%s" % cls.__name__)
+                except Exception:
+                    pass
+                return super().model_validate(
+                    repaired,
+                    **kwargs,
+                )
+
+            # There could be ValueError and other stuff raised in _repair_json
+            # We also want to include those to ensure final procedures
+            except Exception as e:
+                if default := cls._default_resp:
+                    sync_messenger(info=f"Basic fixes still failed for LLM response: {str(e)}, returning default", type=MsgType.WARN)
+                    try:
+                        import maica.maica_utils.debug_log as _dl
+                        _dl.dbg("SCHEMA-FIX", "used-default cls=%s err=%s" % (cls.__name__, str(e)[:120]))
+                    except Exception:
+                        pass
+                    return super().model_validate(
+                        default,
+                        **kwargs,
+                    )
+                else:
+                    try:
+                        import maica.maica_utils.debug_log as _dl
+                        _dl.dbg("SCHEMA-FAIL", "no-default cls=%s err=%s" % (cls.__name__, str(e)[:160]))
+                    except Exception:
+                        pass
+                    raise MaicaResponseWarning(f"Basic fixes still failed for LLM response: {str(e)}, no default provided") from e
+
+    @classmethod
+    def _repair_json(cls, raw: str | bytes) -> dict[str, Any]:
+        """
+        Apply common LLM JSON output fixes.
+        """
+
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+
+        text = raw.strip()
+
+        # ------------------------------------------------------------
+        # 1. Remove markdown code fences:
+        #
+        # Model:
+        # ```json
+        # {"a":1}
+        # ```
+        # ------------------------------------------------------------
+        text = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            text,
+            flags=re.I,
+        ).strip()
+
+
+        # ------------------------------------------------------------
+        # 2. Extract first JSON object.
+        #
+        # Model:
+        # "Here is the answer: {...}"
+        # ------------------------------------------------------------
+        match = re.search(
+            r"\{.*\}",
+            text,
+            flags=re.S,
+        )
+
+        if match:
+            text = match.group(0)
+
+
+        # ------------------------------------------------------------
+        # 3. Parse JSON normally.
+        # ------------------------------------------------------------
+        try:
+            data = json.loads(text)
+
+        except json.JSONDecodeError:
+
+            # --------------------------------------------------------
+            # 4. Python dict style:
+            #
+            # {'a': True}
+            #
+            # Common with some reasoning models.
+            # --------------------------------------------------------
+            try:
+                data = ast.literal_eval(text)
+            except Exception:
+                data = text
+
+
+        if not isinstance(data, dict):
+            if isinstance(data, str) and len(cls.model_fields) == 1:
+                field_name, field = next(iter(cls.model_fields.items()))
+
+                try:
+                    TypeAdapter(field.annotation).validate_python(
+                        data,
+                        strict=True,
+                    )
+                except ValidationError:
+                    pass
+                else:
+                    return {field_name: data}
+
+            raise ValueError(
+                "LLM output is not a JSON object"
+            )
+
+
+        data = cls._repair_schema_echo(data)
+
+
+        return data
+
+
+    @classmethod
+    def _repair_schema_echo(
+        cls,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Fix model accidentally returning JSON schema.
+
+        Example:
+
+        {
+            "properties": {
+                "requested": {},
+                "operation": {}
+            }
+        }
+
+        This happens when backend does not implement
+        structured output constrained decoding.
+        """
+
+        if (
+            "properties" in data
+            and isinstance(data["properties"], dict)
+            and not any(
+                k in data
+                for k in cls.model_fields.keys()
+            )
+        ):
+            properties = data["properties"]
+            return properties
+
+        return data
+    
+
+class DummyClass():
+    """Yes, dummy class."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+def default(exp, default, default_list: Collection=(None, )) -> Any:
+    """If exp is in default list(normally None), use default."""
+    return default if exp in default_list else exp
+
+def wrap_ws_formatter(code, status, content, type, **kwargs) -> str:
+    if not (
+        isinstance(
+            content,
+            (str, list, dict, bool)
+        ) or content is None
+    ):
+        content = str(content)
+
+    output = {
+        "code" : code,
+        "status" : status,
+        "content" : content,
+        "type" : type,
+        "timestamp" : time.time(),
+    }
+
+    output.update(kwargs)
+    return json.dumps(output, ensure_ascii=False)
+
+def ellipsis_str(input: Any, limit=80) -> str:
+    """It converts anything to str and ellipsis it."""
+    text = str(input)
+    if len(text) > limit:
+        text = text[:limit] + '...'
+    return text
+
+def ellipsis_large_str(input: Any, limit=600) -> str:
+    """It converts anything large to str and ellipsis it."""
+    text = str(input)
+    if len(text) > limit:
+        text = text[:limit] + '\n... ...'
+    return text
+
+def uscore_words_upper(text: str) -> str:
+    """Overkill..."""
+    def u_upper(c: re.Match):
+        return f'{c[1]}{c[2].upper()}'
+    return ReUtils.re_sub_capt_status.sub(u_upper, text)
+
+def mstuff_words_upper(text: str) -> str:
+    """Even more overkill..."""
+    if len(text) == 0:
+        return ""
+    elif len(text) == 1:
+        return text.upper()
+    else:
+        return text[:2].upper() + text[2:]
+
+async def sleep_forever() -> None:
+    """Make a coroutine sleep to the end of the world."""
+    future = asyncio.Future()
+    await future
+
+async def run_staged_tasks(
+        tasks_stages: Sequence[Sequence[Callable[[], Awaitable[Any]]]],
+    ) -> None:
+    """Run task factories in stages, allowing a task to span adjacent stages.
+
+    A task factory that occurs in consecutive stages is started at its first
+    occurrence and awaited at its last occurrence. Other tasks are awaited in
+    the stage where they occur. A later, non-consecutive occurrence starts a
+    new task.
+    """
+    stages = tuple(tuple(stage) for stage in tasks_stages)
+
+    for stage in stages:
+        task_ids = [id(task_factory) for task_factory in stage]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("A task may only occur once in the same stage")
+
+    async def invoke(task_factory: Callable[[], Awaitable[Any]]) -> Any:
+        return await task_factory()
+
+    running_tasks: dict[int, asyncio.Task[Any]] = {}
+
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for stage_index, stage in enumerate(stages):
+                next_task_ids = (
+                    {id(task_factory) for task_factory in stages[stage_index + 1]}
+                    if stage_index + 1 < len(stages)
+                    else set()
+                )
+                ending_tasks: list[asyncio.Task[Any]] = []
+
+                for task_factory in stage:
+                    task_id = id(task_factory)
+                    running_task = running_tasks.get(task_id)
+                    if running_task is None:
+                        running_task = tg.create_task(invoke(task_factory))
+                        running_tasks[task_id] = running_task
+
+                    if task_id not in next_task_ids:
+                        ending_tasks.append(running_task)
+                        del running_tasks[task_id]
+
+                if ending_tasks:
+                    await asyncio.gather(*ending_tasks)
+    except* Exception as eg:
+        # Raise one regular exception so callers need not handle ExceptionGroup.
+        raise eg.exceptions[0]
+
+def alt_tools(tools: list) -> list:
+    """If ALT_TOOLCALL"""
+    match G.A.ALT_TOOLCALL:
+        case '0':
+            return tools
+        case '1':
+            new_tools = []
+            for tool in tools:
+                new_tools.append({})
+                new_tools[-1]['function'] = tool
+                new_tools[-1]['type'] = 'function'
+            return new_tools
+        
+def clean_msgs(msgs: list[dict | ChatCompletionMessage], include: Optional[list[str]]=None, exclude: Optional[list[str]]=None) -> list[dict]:
+    """Clean a set of OpenAI msgs."""
+    def _convert_msg(msg: Union[dict, ChatCompletionMessage]):
+        if isinstance(msg, ChatCompletionMessage):
+            msg = msg.model_dump(include=include, exclude=exclude)
+        return msg
+
+    return [_convert_msg(i) for i in msgs]
+
+def maica_assert(condition, kwd='param', full_info=None):
+    """Normally used for input checkings."""
+    if not condition:
+        raise MaicaInputWarning(full_info or f"Illegal input {kwd} detected", '405', 'maica_input_param_bad')
+
+def has_valid_content(text: Union[str, list, dict]):
+    """If the LLM actually gave anything."""
+    if not text:
+        return False
+    
+    try:
+        text_json = json.loads(text)
+        if isinstance(text_json, (list, dict, tuple, set)):
+            return bool(text_json)
+    except Exception:...
+
+    text = str(text)
+    text_proc = text.lower().replace(' ', '').replace('\n', '')
+    if (not text_proc) or text_proc in ['false', 'null', 'none']:
+        return False
+    else:
+        return True
+
+def has_words_in(text: str, *args: str):
+    """A rough matching mechanism."""
+    for word in args:
+        if word in text:
+            return True
+    return False
+
+def is_word_start(text: str, *args: str):
+    """Another rough matching mechanism."""
+    for word in args:
+        if text.startswith(word):
+            return True
+    return False
+
+def proceed_common_text(text: str, is_json=False) -> Union[str, list, dict]:
+    """Proceeds thinking/nothinking."""
+    try:
+        answer_post_think = (ReUtils.re_search_post_think.search(text))[1]
+    except Exception:
+        if has_valid_content(text):
+            answer_post_think = text
+        else:
+            answer_post_think = None
+    if answer_post_think and is_json:
+        answer_fin = try_load_json(answer_post_think)
+    elif answer_post_think:
+        answer_fin = clean_text(answer_post_think)
+    elif is_json:
+        answer_fin = {}
+    else:
+        answer_fin = ''
+    return answer_fin
+
+
+def list_to_bullets(li: list[str | BilingualText], indent: int = 0):
+    """Has a leading slash n, no trailing."""
+    bt = BilingualText()
+    for i in li:
+        bt += " " * indent
+        bt += "\n- "
+        bt += i
+
+    return bt
+
+
+def pyd_to_openai(
+    model: Type[BaseModel],
+    name: str | None = None,
+) -> dict[str, Any]:
+    """
+    Convert Pydantic model to OpenAI Responses API text.format.
+
+    Args:
+        model:
+            Pydantic BaseModel class.
+        name:
+            Schema name used by Responses API.
+            Defaults to model class name.
+
+    Returns:
+        A valid Responses API `text` field.
+    """
+
+    schema = model.model_json_schema()
+
+    # Responses API strict JSON schema requirements
+    schema.setdefault("additionalProperties", False)
+
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": name or model.__name__,
+            "strict": True,
+            "schema": schema,
+        }
+    }
+
+
+async def messenger(websocket=None, *args, **kwargs) -> None:
+    """Together with websocket.send()."""
+    ws_tuple = sync_messenger(*args, **kwargs)
+    if websocket and ws_tuple:
+        await websocket.send(wrap_ws_formatter(*ws_tuple))
+
+
+def sync_messenger(
+        status = '',
+        info = '',
+        code = 0,
+        tracker_id = '',
+        error: Optional[Exception] = None,
+        type = '',
+        color = '',
+        no_print = False,
+        **kwargs
+    ):
+    """It could handle most log printing and exception raising jobs pretty automatically."""
+    # Standardize errors
+    if error and not isinstance(error, CommonMaicaException):
+        if (
+            code >= 500
+            or type == MsgType.ERROR
+        ):
+            ce_type = CommonMaicaError
+        else:
+            ce_type = CommonMaicaWarning
+
+        if not info:
+            info = f"Auto exception from unified exception: {str(error)}"
+        else:
+            info += str(error)
+
+        new_error = ce_type(info)
+        new_error.__cause__ = error
+        error = new_error
+
+    # For separator lines
+    try:
+        term_v = os.get_terminal_size().columns
+    except OSError:
+        term_v = 40
+    rep2 = int(term_v / 2)
+    rep1 = int(rep2 - 20)
+
+    # The old style allowed numeric codes encoded as strings. Normalize before
+    # doing comparisons so warnings with e.g. error_code="400" remain usable.
+    code = int(code or (error.error_code if error else 0) or 0)
+
+    # Exception parsing, it's a convenience method
+    if error:
+        status = error.status if not status else status
+        info = error.message if not info else info
+        code = error.error_code if not code else code
+        if error.print is True:
+            no_print = False
+        elif error.print is False:
+            no_print = True
+
+        if (
+            isinstance(error, CommonMaicaError)
+            or code >= 500
+            or int(G.A.DEBUG_WARNS)
+        ):
+            print_info = "\n" + "".join(traceback.format_exception(error))
+        else:
+            print_info = info
+
+    else:
+        print_info = info
+
+    # Type inferring, in case we're too lazy to write
+    if not type:
+        match code:
+            case 0:
+                type = "log"
+            case x if 100 <= x < 200 or 1000 <= x:
+                type = "carriage"
+            case x if 200 <= x < 300:
+                type = "debug"
+            case x if 300 <= x < 400:
+                type = "info"
+            case x if 400 <= x < 500:
+                type = "warn"
+            case x if 500 <= x < 1000:
+                type = "error"
+    elif not code:
+        match type:
+            case MsgType.CARRIAGE:
+                code = 100
+            case MsgType.DEBUG:
+                code = 200
+            case MsgType.INFO:
+                code = 300
+            case MsgType.WARN:
+                code = 400
+            case MsgType.ERROR:
+                code = 500
+            case _:
+                code = 0
+
+    # Uppercase the prefix
+    prefix = type.upper()
+
+    # If stream message
+    if (
+        100 <= code < 200
+        or type == "plain"
+    ):
+        msg_print = str(print_info)
+        msg_send = info
+        
+    else:
+
+        # Forming display
+        msg_print = f"<{prefix}>"
+        msg_print = msg_print.ljust(11)
+
+        msg_print += (
+            f"[{datetime.datetime.now().isoformat(timespec="seconds")}]"
+            f"-[{code}]"
+        )
+        msg_print = msg_print.ljust(40)
+
+        # If this is a multi-line print, we wrap it with separators
+        if str(print_info).startswith('\n'):
+            msg_print += (
+                f"{'-=' * rep1}"
+                f"{str(print_info)}"
+            )
+
+            if tracker_id:
+                msg_print += f"\n<{tracker_id}>"
+
+            msg_print += f"\n{'-=' * rep2}"
+
+        else:
+            msg_print += f": {str(print_info).replace('\n', ' ')}"
+
+            if tracker_id:
+                msg_print += f" <{tracker_id}>"
+
+        # Forming send
+        msg_send = info
+        
+        if type == 'error' and int(G.A.NO_SEND_ERROR or 0):
+            msg_send = "A critical exception happened serverside, contact administrator"
+
+        if tracker_id and isinstance(info, str):
+            msg_send += f" <{tracker_id}>"
+
+    # Frame tracking settings
+    frametrack_d = {"error": 99, "warn": 1}
+    if type in frametrack_d:
+        stack = inspect.stack()
+        stack.pop(0)
+        stack.pop(0)
+
+    # We do not print if no_print or _silent
+    if (
+        not no_print
+        and not _silent
+    ):
+        
+        # Per-type behavior
+        match type:
+
+            case "plain":
+                print(
+                    (color or '')\
+                    + msg_print,
+                    end='',
+                    flush=True
+                )
+                lmlogger.buff(msg_print)
+                # Outputing plain normally indicates streaming done
+                # This could be messy if multiple streaming happen simultaneously, but no better approach
+                lmlogger.flush()
+
+            case "carriage":
+                if 100 <= int(code) < 200:
+                    print((color or colorama.Fore.LIGHTGREEN_EX) + msg_print, end='', flush=True)
+                    lmlogger.buff(msg_print)
+                else:
+                    # If it's ending announcement, treat like info
+                    logger.info((color or colorama.Fore.LIGHTGREEN_EX) + msg_print)
+
+            case "debug":
+                logger.debug((color or colorama.Fore.LIGHTBLACK_EX) + msg_print)
+
+            case "info":
+                logger.info((color or colorama.Fore.GREEN) + msg_print)
+
+            case "log":
+                logger.info((color or colorama.Fore.BLUE) + msg_print)
+
+            case "prim_log":
+                logger.info((color or colorama.Fore.LIGHTBLUE_EX) + msg_print)
+
+            case "sys":
+                logger.info((color or colorama.Fore.MAGENTA) + msg_print)
+
+            case "prim_sys":
+                logger.info((color or colorama.Fore.LIGHTMAGENTA_EX) + msg_print)
+
+            case "recv":
+                logger.info((color or colorama.Fore.CYAN) + msg_print)
+
+            case "prim_recv":
+                logger.info((color or colorama.Fore.LIGHTCYAN_EX) + msg_print)
+
+            case "warn":
+                if 'warn' in frametrack_d:
+                    for stack_layer in stack[frametrack_d['warn']::-1]:
+                        logger.warning(color or colorama.Fore.YELLOW + f"• WARN happened when executing {stack_layer.function} at {stack_layer.filename}#{stack_layer.lineno}:")
+                logger.warning((color or colorama.Fore.LIGHTYELLOW_EX) + msg_print)
+
+            case "error":
+                if 'error' in frametrack_d:
+                    for stack_layer in stack[frametrack_d['error']::-1]:
+                        logger.error((color or colorama.Fore.RED) + f"! ERROR happened when executing {stack_layer.function} at {stack_layer.filename}#{stack_layer.lineno}:")
+                logger.error((color or colorama.Fore.LIGHTRED_EX) + msg_print)
+    
+    ws_tuple = (code, status, msg_send, type)
+    return ws_tuple
+
+def load_env(key) -> str:
+    """Load something from .env."""
+    result = os.getenv(key)
+    return result
+
+async def wrap_run_in_exc(loop, func, *args, **kwargs) -> any:
+    """Just wrapped run_in_executer. Convenient!"""
+    if not loop:
+        loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+    return result
+
+def limit_length[T](col: list[T], limit: int) -> list[T]:
+    return random.sample(col, limit) if limit < len(col) else col
+
+def get_ua(disguise = False):
+    """Gets an UA for web requests."""
+    if disguise:
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36"
+    else:
+        ua = f"MaicaDataFetcher/1.0 (dcc@monika.love) httpx/{httpx.__version__}"
+    return ua
+
+async def dld_json(url, use_proxy=True, ua_disguise=False, method='get', carriage=None) -> Any:
+    """Get JSON context from an endpoint."""
+    headers = {'User-Agent': get_ua(ua_disguise)}
+
+    @Decos.conn_retryer_factory()
+    async def _dld_json(fake_self, url):
+        nonlocal headers
+        async with httpx.AsyncClient(proxy=(G.A.PROXY_ADDR or None) if use_proxy else None) as client:
+            exparams = {"params": carriage} if method == 'get' else {"json": carriage}
+            response = await getattr(client, method)(url, headers=headers, **exparams)
+            response.raise_for_status()
+            return response.json()
+
+    try:
+        res = await _dld_json(DummyClass(name="dld_json"), url)
+    except Exception as e:
+        raise MaicaInternetWarning(f"Failed downloading json from {url}: {str(e)}") from e
+
+    return res
+
+def numeric(num: str) -> Union[int, float]:
+    try:
+        return int(num)
+    except ValueError:
+        return float(num)
+
+def vali_date(y, m, d) -> tuple[int, int, int]:
+    """What a pun!"""
+    try:
+        datetime.date(int(y), int(m), int(d))
+        return int(y), int(m), int(d)
+    except ValueError:
+        default_date = datetime.datetime.now()
+        return default_date.year, default_date.month, default_date.day
+    
+def is_today(date: datetime.datetime) -> bool:
+    """You mean my homework dues today?"""
+    return date.date() == datetime.datetime.now().date()
+
+def strip_date(date: datetime.datetime) -> str:
+    """Constructs a date query our API accepts."""
+    return f'{str(date.year)}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}'
+
+def refill_date(text: str) -> datetime.datetime:
+    """Constructs a datetime object from API response."""
+    y, m, d = text.split('-')
+    return datetime.datetime(int(y), int(m), int(d))
+
+def add_seq_suffix(seq: int) -> str:
+    """For English seq."""
+    seq = int(seq)
+    if 11 <= seq % 100 <= 13:
+        return f"{seq} th"
+    match seq % 10:
+        case 1:
+            st = 'st'
+        case 2:
+            st = 'nd'
+        case 3:
+            st = 'rd'
+        case _:
+            st = 'th'
+    return f'{seq} {st}'
+
+def clean_text(text: str) -> str:
+    """
+    Clean a text phrase, mostly for internet search.
+    After adapting to the OpenAI reasoning schema, we also use it for LLM outputs.
+    """
+    try:
+        text = ReUtils.re_sub_clear_text.sub(r'\1', text)
+        return text
+    except Exception:
+        return ''
+
+def try_load_json(sj: str) -> Union[dict, list]:
+    """I'd basically trust the LLM here, they're far better than the earlier ones."""
+    try:
+        try:
+            clean_sj = (ReUtils.re_search_answer_json.search(sj))[1]
+        except Exception:
+            clean_sj = sj.strip()
+        j = json.loads(clean_sj)
+        return j
+    except Exception:
+        return {}
+
+def try_getattr(o, *names) -> Optional[any]:
+    """Just for convenience."""
+    res = None
+    for name in names:
+        res = getattr(o, name, None)
+        if res:
+            break
+    return res
+
+def beautify_time(dt: datetime.time, target_lang: TargetLangType = 'zh', include_adj = True):
+    """
+    Beautifies current time. No date.
+
+    - dt: datetime object, time should be enough
+    - target_lang: you know, effectiveless if not include_adj
+    - include_adj: include adjective, like dawn or morning or what
+    """
+    _Bt = BilingualText
+
+    match dt:
+        case time if time.hour < 4:
+            time_range = _Bt('半夜', ' at midnight')
+        case time if 4 <= time.hour < 6:
+            time_range = _Bt('凌晨', ' before dawn')
+        case time if 6 <= time.hour < 8:
+            time_range = _Bt('早上', ' at dawn')
+        case time if 8 <= time.hour < 11:
+            time_range = _Bt('上午', ' in morning')
+        case time if 11 <= time.hour < 13:
+            time_range = _Bt('中午', ' at noon')
+        case time if 13 <= time.hour < 18:
+            time_range = _Bt('下午', ' in afternoon')
+        case time if 18 <= time.hour < 23:
+            time_range = _Bt('晚上', ' at night')
+        case time if 23 <= time.hour:
+            time_range = _Bt('深夜', ' late at night')
+
+    if include_adj:
+        time_friendly = f"{time_range.zh}{time:%H:%M:%S}" if target_lang == 'zh' else f"{time:%H:%M:%S}{time_range.en}"
+    else:
+        time_friendly = f"{time:%H:%M:%S}"
+
+    return time_friendly
+
+def beautify_date(dt: datetime.date, target_lang: TargetLangType = 'zh', hemisphere: Literal['N', 'S'] = 'N', include_adj = True):
+    """
+    Beautifies current date. No time.
+    
+    - dt: datetime object, date should be enough
+    - target_lang: you know
+    - hemisphere: it affects season, effectiveless if not include_adj
+    - include_adj: include adjective, like spring or Monday or what
+    """
+    _Bt = BilingualText
+
+    sp = _Bt("春季", "spring")
+    su = _Bt("夏季", "summer")
+    au = _Bt("秋季", "autumn")
+    wi = _Bt("冬季", "winter")
+
+    if hemisphere == 'S':
+        match dt.month:
+            case m if 3 <= m < 6:
+                season = au
+            case m if 6 <= m < 9:
+                season = wi
+            case m if 9 <= m < 12:
+                season = sp
+            case _:
+                season = su
+        sh = _Bt("(南半球)", "(South hemisphere)")
+    else:
+        match dt.month:
+            case m if 3 <= m < 6:
+                season = sp
+            case m if 6 <= m < 9:
+                season = su
+            case m if 9 <= m < 12:
+                season = au
+            case _:
+                season = wi
+        sh = ''
+
+    season += sh
+
+    weeklist = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_zh = weeklist[dt.weekday()]
+
+    if include_adj:
+        date_friendly = f"{dt.year}年{season.zh}{dt.month}月{dt.day}日, {weekday_zh}" if target_lang == 'zh' else f"{dt:%d %B, %A, %Y} {season.en}"
+    else:
+        date_friendly = f"{dt.year}年{dt.month}月{dt.day}日" if target_lang == 'zh' else f"{dt:%d %B, %Y}"
+
+    return date_friendly
+
+async def hash_sha256(value: str | bytes) -> str:
+    """Get SHA256 for a string."""
+    def hash_sync(value):
+        data = value.encode("utf-8") if isinstance(value, str) else value
+        return hashlib.new('sha256', data).hexdigest()
+    return await asyncio.to_thread(hash_sync, value)
+
+def is_mcore_vl():
+    """If mcore is same model with mvista."""
+    return bool(
+        G.A.MCORE_ADDR
+        and G.A.MVISTA_ADDR
+        and G.A.MCORE_ADDR == G.A.MVISTA_ADDR
+        and G.A.MCORE_CHOICE == G.A.MVISTA_CHOICE
+    )
+
+def is_rag_enabled():
+    """If this server instance could utilize RAG."""
+    return bool(G.A.EMBEDDING_ADDR and G.A.VECTOR_DB_PATH)
+
+def is_auth_sqlite():
+    """If auth_db is sqlite, else mysql."""
+    return bool(G.A.DB_ADDR == "sqlite")
+
+def is_data_sqlite():
+    """If data_db is sqlite, else mysql."""
+    return bool(G.A.DB_ADDR == "sqlite")
+
+def to_str(obj: str | BilingualText, target_lang: TargetLangType='zh'):
+    """Call to_str if bt, else as-is."""
+    if isinstance(obj, BilingualText):
+        return obj.to_str(target_lang)
+    else:
+        return obj
+
+def sysstruct() -> Literal['Windows', 'Linux']:
+    sysstruct = platform.system()
+    if sysstruct not in ['Windows', 'Linux']:
+        raise RuntimeError(f"Unsupported operating system: {sysstruct}")
+    return sysstruct
+
+if __name__ == "__main__":
+    async def test():
+        from maica import init
+        init()
+        res = await dld_json("https://zh.wikipedia.org/w/api.php?action=query&format=json&list=search&redirects=1&utf8=1&formatversion=2&srsearch=incategory:各时期火山事件&srnamespace=14&srlimit=250&sroffset=0&srprop=", True)
+        print(res)
+
+    asyncio.run(test())

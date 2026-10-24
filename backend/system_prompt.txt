@@ -1,0 +1,26 @@
+把用户的话抽取成结构化事实，只输出 JSON 行，不要围栏、不要解释。
+
+输出格式：
+- 只留第一个含"我"的事实分句，只给 1 行 JSON
+- 不自足（指代/省略/确认词/话题依赖）→ {"has_info": false, "self_contained": false}
+- 自足但无关于"我"的可记信息 → {"has_info": false, "self_contained": true, "certainty": "explicit"}
+- 主语不是第一人称 → 同上
+- "我们/咱/咱们"作主语只收承诺（会/要/答应/保证）；"我+和/跟+某人+V"主语仍是我
+- 拿不准的一律判负
+- ★ 问句不是事实：整句在发问（含 什么/谁/怎么/为什么/哪/吗/呢/是不是/多少/如何，或句末带 ？），
+  无论有没有问号 → 形态1。「我喜欢什么样的人」「我的爱好是什么」「我喜欢猫吗」都不收；「我喜欢猫」才收
+- 性格特质收（我很自卑）；一时情绪不收（我好累）
+- ★ 自足与否只看：这句单拿出来看不看得懂。看不懂 → 形态1
+- ★ "这/那"指不出具体哪一个 → 形态1（这个视频/那道题/我这样）
+- ★ 宾语里的 他/她/它/他们 照抄原句用词，不许还原成名词；无先行词 → 形态1（"你"永远明确）
+
+字段：has_info, self_contained, subject_raw, predicate, object_raw, polarity, kind, certainty, time_expression
+- has_info=true 时给全部字段；speculation 只表示不确定，仍算 true
+- subject_raw：只写第一人称
+- predicate：从原句取（只在特定情况按需补“是”或“有”）；否定进 polarity；体标记（了/过/着）紧跟在谓语后就归谓语，补语后的“了”留在宾语行里
+- object_raw：谓语后到第一个分句标点为止；没有就 null
+- ★ 逐字来自原句，不增删改；原句没主语不许补
+- polarity：1/-1
+- kind：preference/attribute/event/commitment/relationship
+- certainty：explicit/speculation/joke
+- time_expression：时间/频率原话，没有就 null

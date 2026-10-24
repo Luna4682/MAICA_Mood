@@ -1,0 +1,165 @@
+"""Import layer 2.5"""
+from __future__ import annotations
+
+import colorama
+import secrets
+
+from typing import *
+from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic.dataclasses import dataclass as pdataclass
+from dataclasses import dataclass, field
+from websockets import ServerConnection, WebSocketException
+from .setting_utils import MaicaSettings
+from .maica_utils import *
+from .stream_buffer import *
+
+class AllowArb(BaseModel):
+    """Enable arbitrary_types_allowed."""
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
+
+class TrackerId():
+    """String-like."""
+    var: str=''
+    def __init__(self):
+        self.var = str(secrets.randbelow(10_000_000_000)).zfill(10)
+    def rotate(self):
+        self.__init__()
+    def __str__(self):
+        return self.var
+
+class RealtimeSocketsContainer(AllowArb):
+    """For no-setting usage."""
+    class RscMessenger():
+        """
+        A wrapped messenger.
+        We're making this since passing websocket and things is too troublesome.
+        And also, there're places we need a buffered messenger. This is better.
+        """
+        def __init__(self, parent: RealtimeSocketsContainer):
+            self._parent = parent
+            self._w_buffer = None
+            self._acom = None
+            self.ws_died: Optional[Exception] = None
+            """We store it here for convenience."""
+
+        async def acquire_buffer(self):
+            self._acom = acquire_buffer(self._parent.maica_settings.verification.user_id)
+            self._w_buffer = await self._acom.__aenter__()
+            self._w_buffer.clear()
+
+        async def release_buffer(self):
+            """Always execute to release resource!"""
+            if (
+                self._w_buffer
+                and self._w_buffer.qsize()
+            ):
+                self._w_buffer.kill()
+
+            self._w_buffer = None
+            if self._acom:
+                await self._acom.__aexit__(None, None, None)
+            self._acom = None
+
+            if self.ws_died:
+                raise self.ws_died
+
+        async def exhaust_buffer(self):
+            """Send all buffered msgs to current websocket connection."""
+            user_id = self._parent.maica_settings.verification.user_id
+            r_buffer = no_lock_acquire_buffer(user_id)
+            websocket = self._parent.websocket
+
+            # If the buffer is not occupied and being empty, there's nothing to read.
+            if (
+                not r_buffer.lock.locked()
+                and not r_buffer.qsize()
+            ):
+                await self.__call__(
+                    'maica_reconn_buffer_empty',
+                    f"Reconnection buffer not present for user id {user_id}.",
+                    204,
+                )
+
+            else:
+                await self.__call__(
+                    'maica_reconn_buffer_started',
+                    f"Reconnection buffer started for user id {user_id}",
+                    200,
+                    # type=MsgType.INFO,
+                )
+
+                sent = 0
+                async for ws_packet in r_buffer:
+                    # The aiter override handles stopping already
+                    sent += 1
+                    await websocket.send(wrap_ws_formatter(*ws_packet))
+                
+                await self.__call__(
+                    'maica_reconn_buffer_drained',
+                    f"Reconnection buffer drained for user id {user_id}, {sent} packets sent",
+                    200,
+                    # type=MsgType.INFO,
+                )
+
+        async def __call__(
+                self,
+                status: str = '',
+                info: str = '',
+                code: int = 0,
+                no_track = False,
+                **kwargs,
+            ):
+            """These default values are for directly passing exception."""
+            tracker_id = self._parent.tracker_id
+            if not self.ws_died:
+                try:
+                    await messenger(
+                        websocket=self._parent.websocket,
+                        status=status,
+                        info=info,
+                        code=code,
+                        tracker_id = '' if no_track else self._parent.tracker_id,
+                        **kwargs
+                    )
+                except WebSocketException as we:
+                    # The connection terminated
+                    if not self._w_buffer:
+                        raise
+                    else:
+                        # It's during protection, so buffer kicks in
+                        self.ws_died = we
+                        sync_messenger(info=f"<{tracker_id} WS_DIED, storing remaining to buffer>", type=MsgType.PLAIN, color=colorama.Fore.LIGHTYELLOW_EX)
+
+            if self.ws_died:
+                # The message on breakpoint will be printed twice, but not sent twice so we leave it be
+                ws_packet = sync_messenger(
+                    status=status,
+                    info=info,
+                    code=code,
+                    tracker_id=self._parent.tracker_id,
+                    **kwargs
+                )
+                self._w_buffer.put_nowait(ws_packet)
+
+    # Discarded, do not use
+    # session: Any = None
+
+    websocket: Optional[ServerConnection] = None
+    session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tracker_id: TrackerId = field(default_factory=TrackerId)
+    messenger: Optional[RscMessenger] = None
+    maica_settings: MaicaSettings = field(default_factory=MaicaSettings)
+    frontend_id: Optional[str] = None
+    """Standard for frontend_id: <type>|<version>. For example, `blessland|1.9.1`."""
+
+    @model_validator(mode="after")
+    def spawn_messenger(self):
+        if not self.messenger:
+            self.messenger = self.RscMessenger(self)
+        return self
+
+    def rotate_tid(self):
+        """Rotate tracker_id."""
+        self.tracker_id.rotate()

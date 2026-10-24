@@ -1,0 +1,31 @@
+{
+  "_readme": "MAICA 开发者模式配置。改完保存即可生效（后端会按文件修改时间自动重载），不需要改代码。",
+  "_readme_debug": {
+    "enabled": "总开关。关掉后本文件其余项都不起作用，日志也不再写。",
+    "chain_log": "全链路事件（回合输入 / 结构化校验 / 向量命中 / 向量同步 / 大模型调用 / 输出）。",
+    "content_log": "是否记录玩家文本与模型输出片段。介意隐私可设 false。",
+    "prompt_log": "是否记录【完整提示词】。默认 false —— 它含玩家的私人内容，只在你排查问题时才建议打开。",
+    "console": "是否同时打印到控制台窗口。",
+    "log_file": "日志文件名（相对后端根目录，即与 .env 同级）。超过 max_bytes 会自动轮转一份 .1 备份。",
+    "max_bytes": "单个日志文件的上限字节数，默认 8 MB。",
+    "preview_chars": "单条日志里各字段的预览长度上限。"
+  },
+  "_readme_secrets": "密钥永不写入日志：模块内置了脱敏规则，任何字段都会先过滤 sk- / Bearer / api_key / 超长随机串等。",
+  "facts": {
+    "_readme": "结构化事实库（P3）。dry_run=true 时只写日志不落库；小模型已上线（r8 = r8d_q8_0），故 2026-10-17 起为 false。",
+    "enabled": true,
+    "dry_run": false,
+    "speculation_ttl_days": 7,
+    "speculation_purge_days": 30
+  },
+  "debug": {
+    "enabled": true,
+    "chain_log": true,
+    "content_log": false,
+    "prompt_log": false,
+    "console": false,
+    "log_file": "debug-chain.log",
+    "max_bytes": 8388608,
+    "preview_chars": 600
+  }
+}

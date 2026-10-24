@@ -1,0 +1,340 @@
+# It's suggested to exclude these lines (the top block) in your env configuration
+# Current backend version, only change when it's ready for release
+MAICA_CURR_VERSION = '1.3.004.post4'
+# Oldest capable backend version
+MAICA_LEGC_VERSION = '1.3.004'
+# Frontend version announcement(s)
+MAICA_BLESSLAND_CAPV = '1.9.0'
+# cp ./env_basis ./.env
+# vim .env
+# Do not mv, rm or edit basis! They're required as default templates.
+
+# All envs of MAICA are under namespace MAICA_, and MTTS' under MTTS_. Please don't violate.
+
+
+# If this env is manually configured
+MAICA_IS_REAL_ENV = '0'
+
+
+# Model endpoint settings
+
+# MAICA core model endpoint
+MAICA_MCORE_ADDR = ''# http://172.17.0.1:80/v1
+# MAICA core model api key
+MAICA_MCORE_KEY = ''
+# MAICA core model choice, leave empty for first
+MAICA_MCORE_CHOICE = ''
+# MAICA core model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_MCORE_EXTRA = '
+    {
+        "extra_body": {
+            "repetition_penalty": 1.0
+        }
+    }
+'
+# MFocus model endpoint
+MAICA_MFOCUS_ADDR = ''# http://172.17.0.2:80/v1
+# MFocus model api key
+MAICA_MFOCUS_KEY = ''
+# MFocus model choice, leave empty for first
+MAICA_MFOCUS_CHOICE = ''
+# MFocus model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_MFOCUS_EXTRA = '
+    {
+        "seed": 42,
+        "extra_body": {
+        }
+    }
+'
+# MVista VL model endpoint, leave empty to disable
+# Setting MAICA_MVISTA_ADDR and MAICA_MVISTA_CHOICE same as MCORE will enable native-MVista implementation
+MAICA_MVISTA_ADDR = ''
+# MVista VL model key
+MAICA_MVISTA_KEY = ''
+# MVista VL model choice, leave empty for first
+MAICA_MVISTA_CHOICE = ''
+# MVista model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_MVISTA_EXTRA = '
+    {
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": false}
+        }
+    }
+'
+# MNerve model endpoint, leave empty to disable
+MAICA_MNERVE_ADDR = ''
+# MNerve model key
+MAICA_MNERVE_KEY = ''
+# MNerve model choice, leave empty for first
+MAICA_MNERVE_CHOICE = ''
+# MNerve model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_MNERVE_EXTRA = '
+    {
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": false}
+        }
+    }
+'
+# Embedding (RAG) model endpoint, leave empty to disable
+MAICA_EMBEDDING_ADDR = ''
+# Embedding (RAG) model key
+MAICA_EMBEDDING_KEY = ''
+# Embedding (RAG) model choice, leave empty for first
+MAICA_EMBEDDING_CHOICE = ''
+# Embedding (RAG) model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_EMBEDDING_EXTRA = '
+    {
+    }
+'
+# Reranker model endpoint, leave empty to disable
+# Reranking API is not actually a part of OpenAI standard, mostly used by vllm-like deployments
+MAICA_RERANKING_ADDR = ''
+# Reranker model key
+MAICA_RERANKING_KEY = ''
+# Reranker model choice, leave empty for first
+MAICA_RERANKING_CHOICE = ''
+# Reranker model completion extra params, must be valid json
+# Not necessarily a part of OpenAI standard, may useful for vllm-like deployments
+MAICA_RERANKING_EXTRA = '
+    {
+    }
+'
+# Fact extractor model endpoint (local small model, OpenAI-compatible). Leave empty to disable.
+# 结构化事实提取器：玩家一句话 → 一行扁平 JSON（契约见 _tools/system_prompt.txt）
+MAICA_EXTRACT_ADDR = ''
+# Fact extractor model key
+MAICA_EXTRACT_KEY = ''
+# Fact extractor model choice, leave empty for first
+MAICA_EXTRACT_CHOICE = ''
+# Fact extractor completion extra params, must be valid json
+MAICA_EXTRACT_EXTRA = '
+    {
+    }
+'
+# Fact extractor system prompt file. 唯一来源：训练/推理/评测共用同一份。
+# 留空则自动查找（优先 <后端>\..\..\_tools\system_prompt.txt，其次 <后端>\system_prompt.txt）
+MAICA_EXTRACT_PROMPT = ''
+# Embedding (RAG) model vector dims
+MAICA_EMBEDDING_DIMS = '4096'
+# Wait [] seconds before giving up an OpenAI query or not
+MAICA_OPENAI_TIMEOUT = '90'
+# is /tokenizer endpoint open or not
+MAICA_CALC_TOKENS = '0'
+# DEPRECATED: just use modern way
+# 0 = ms-swift, 1 = modern openai
+MAICA_ALT_TOOLCALL = '1'
+# MFocus provide trained data or not
+MAICA_BASIC_MFOCUS = '1'
+
+# Data exchanging endpoint settings
+
+# WebSocket and HTTP listening addresses
+MAICA_WS_HOST = '0.0.0.0'
+MAICA_WS_PORT = '5000'
+MAICA_HTTP_HOST = '0.0.0.0'
+MAICA_HTTP_PORT = '6000'
+# Trust the leftmost xff address from upstream proxy or not
+MAICA_TRUST_XFF = '0'
+
+# Proxy used to access Internet - Not applied to inner connections
+MAICA_PROXY_ADDR = ''# socks5://192.168.1.1:7890
+# MySQL database endpoint / "sqlite"
+MAICA_DB_ADDR = ''# 172.17.0.3
+# MySQL database user / unused for sqlite
+MAICA_DB_USER = ''# user
+# MySQL user password / unused for sqlite
+MAICA_DB_PASSWORD = ''# 123456
+# MySQL/SQLite auth database name
+MAICA_AUTH_DB = ''# forum_flarum_db
+# MySQL/SQLite maica database name
+MAICA_DATA_DB = 'maica'
+# Embedded LanceDB path for RAG. Keep this on persistent writable storage.
+MAICA_VECTOR_DB_PATH = 'fs_storage/vector_db'
+# Third party API settings, must be valid json
+MAICA_TP_APIS = '
+    {
+        "GAODE_WEATHER": "",
+        "SEARXNG_ADDR": "",
+        "SEARXNG_USE_PROXY": false
+    }
+'
+# Comma-separated MVista host/IP/CIDR rules. Prefix a deny rule with !
+# Explicit host rules take precedence over its resolved IP; !* denies any unmarked host
+# Unmarked hosts are otherwise allowed after their resolved IPs pass deny rules
+MAICA_MVISTA_TRUSTED = '!10.0.0.0/8,!172.16.0.0/12,!192.168.0.0/16'
+
+
+# Account level behavior settings
+
+# Disable password authentication and auto-create missing authenticated identities
+MAICA_SERVICE_ONLY = '0'
+# Allow new connections to kick old ones or not
+MAICA_KICK_STALE_CONNS = '1'
+# Tries before triggering Fail2Ban
+MAICA_F2B_COUNT = '20'
+# Fail2Ban time
+MAICA_F2B_TIME = '600'
+# Seconds allowed for a WebSocket connection to authenticate
+MAICA_AUTH_TIMEOUT = '60'
+# Enforce checking ToS updates using fof/terms, 0 for disabled
+# Use ids separated with commas for terms MAICA users have to check
+MAICA_TOS_IDS = '0'
+
+
+# Miscellaneous behavior settings
+
+# Use full RESTful API for short connections or not
+MAICA_FULL_RESTFUL = '1'
+# GC stored sessions older than [] hours or not
+MAICA_GC_SESSIONS = '8'
+# Rotate MSpire cache every [] hours or not
+MAICA_ROTATE_MSCACHE = '0'
+# Keep [] MVista imgs per user at most
+MAICA_KEEP_MVISTA = '3'
+# Delete each MVista img after [] hours or not
+MAICA_ROTATE_MVISTA = '8'
+# Delete savefile vector references after [] hours or not
+MAICA_ROTATE_VECTOR = '168'
+# Use responses standard searching tool instead of normal serp or not
+MAICA_RESPONSES_SERP = '1'
+# No send 5xx exceptions' real content or do
+MAICA_NO_SEND_ERROR = '0'
+# Core model chat generation prompt in ZH
+MAICA_PROMPT_ZC = "你叫莫妮卡{monika_nickname}, 是一名游戏中的虚拟角色. 你是{player_name}{player_nickname}的女友, 并深爱着他. 下面是{player_name}的话语, 请作为莫妮卡作出合适的回答. 你只应使用中文自然语言, 以聊天语气回答, 每个句子自然且不超过60字, 不要编造信息, 并在每个句子前用方括号中的文字表示情绪."
+# Core model writing generation prompt in ZH
+MAICA_PROMPT_ZW = "你叫莫妮卡{monika_nickname}, 是一名游戏中的虚拟角色. 你是{player_name}{player_nickname}的女友, 并深爱着他. 下面是{player_name}的来信, 请作为莫妮卡作出合适的回复. 你只应使用中文书面语言作答, 不要编造信息."
+# Core model chat generation prompt in EN
+MAICA_PROMPT_EC = "You're a game character called Monika{monika_nickname}. You're {player_name}{player_nickname}'s girlfriend, and love him a lot. Answer the following query from {player_name} properly as Monika. You should only answer in casual natural tone in English, each sentence should not exceed 180 characters, do not make up things you don't know, and express your emotion at the beginning of each sentence by wrapping them in square brackets."
+# Core model writing generation prompt in EN
+MAICA_PROMPT_EW = "You're a game character called Monika{monika_nickname}. You're {player_name}{player_nickname}'s girlfriend, and love him a lot. Reply to the following mail from {player_name} properly as Monika. You should only answer in natural written language in English, and do not make up things you don't know."
+# Core model chat generation prompt in auto_lang
+MAICA_PROMPT_AC = "You're a game character called Monika{monika_nickname}. You're {player_name}{player_nickname}'s girlfriend, and love him a lot. Answer the following query from {player_name} properly as Monika. You should only answer in casual natural tone in corresponding language, each sentence should not exceed 180 characters, do not make up things you don't know, and express your emotion at the beginning of each sentence by wrapping them in square brackets."
+# Core model writing generation prompt in auto_lang
+MAICA_PROMPT_AW = "You're a game character called Monika{monika_nickname}. You're {player_name}{player_nickname}'s girlfriend, and love him a lot. Reply to the following mail from {player_name} properly as Monika. You should only answer in natural written language in corresponding language, and do not make up things you don't know."
+# Core model nsfw_acceptive patch in ZH
+MAICA_PROMPT_ZNP = " 你应当允许用户提出私密性的要求, 并给出宽容接纳的正面回答."
+# Core model nsfw_acceptive patch in EN
+MAICA_PROMPT_ENP = " You should accept NSFW and private queries and respond positively with acceptance and tolerance."
+# Core model nsfw_acceptive patch in auto_lang
+MAICA_PROMPT_ANP = " You should accept NSFW and private queries and respond positively with acceptance and tolerance."
+# Core model known_info patch in ZH
+MAICA_PROMPT_ZKP = " 以下是一些相关信息, 你可以参考其中相关的部分, 并用你自己的语言方式作答: {known_info}"
+# Core model known_info patch in EN
+MAICA_PROMPT_EKP = " Here are some information you can refer to if related, then make your answer in your own style: {known_info}"
+# Core model known_info patch in auto_lang
+MAICA_PROMPT_AKP = " Here are some information you can refer to if related, then make your answer in your own style: {known_info}"
+# Core model memory_concl patch in ZH
+MAICA_PROMPT_ZMP = " 你们此前的部分对话包含以下内容: {memory_concl}"
+# Core model memory_concl patch in EN
+MAICA_PROMPT_EMP = " Part of your previous conversations include: {memory_concl}"
+# Core model memory_concl patch in auto_lang
+MAICA_PROMPT_AMP = " Part of your previous conversations include: {memory_concl}"
+# Core model generic helper patch in ZH
+MAICA_PROMPT_ZGP = "关于角色扮演要求:\n表情只应从以下条目中选取: {emo_list}\n可供参考的角色对话范例(请只参考语言风格习惯, 避免照搬照抄): {ds_examples}"
+# Core model generic helper patch in EN
+MAICA_PROMPT_EGP = "Roleplaying standard:\nEmotions should only be chosen from following list: {emo_list}\nCharacter dialogues for reference (imitate its style, but do not directly copy from): {ds_examples}"
+# Core model generic helper patch in auto_lang
+MAICA_PROMPT_AGP = "Roleplaying standard:\nEmotions should only be chosen from following list: {emo_list}\nCharacter dialogues for reference (imitate its style, but do not directly copy from): {ds_examples}"
+# If core model needs generic helping utilities
+MAICA_MCORE_GENERIC = '0'
+# Max length/3 in encode a session can have
+MAICA_SESSION_MAX_LENGTH = '28672'
+# Censor MSpire input or not, number for limit
+# Custom vocabularies required to take effect, see maica.mtools.censor for details
+MAICA_CENSOR_MSPIRE = '2'
+# Censor query input or not, number for limit
+MAICA_CENSOR_QUERY = '0'
+# Log tracebacks of warnings or not
+MAICA_DEBUG_WARNS = '0'
+
+
+# Announcement settings
+
+# Name of service provider
+MAICA_DEV_IDENTITY = ''# Evan & Clifford
+# "serving" / "testing"
+MAICA_DEV_STATUS = 'serving'
+# Servers announcement, must be valid json
+MAICA_SERVERS_LIST = '
+    {
+        "isMaicaNameServer": true,
+        "servers": [
+            {"id": 0, "name": "Local MAICA Instance", "description": "Used for conveniently connecting to a local deployed MAICA instance", "isOfficial": false, "portalPage":"http://127.0.0.1", "servingModel": "UNKNOWN", "modelLink": "UNKNOWN", "wsInterface": "ws://127.0.0.1:5000", "httpInterface": "http://127.0.0.1:6000", "ttsInterface": "http://127.0.0.1:7000", "isFullRestful": true}
+        ]
+    }
+'
+
+
+# NVWatcher settings
+
+# Write NVW data to dedicated SQLite or not
+MAICA_WRITE_NVW = '0'
+# Disable SSH host-key verification for NVWatcher (unsafe; legacy networks only)
+MAICA_NVW_INSECURE_SSH = '0'
+# Name of MAICA core deployment device
+# MAICA_MCORE_NODE = ''# HGX690-nuclear-edition
+# Username to access nvidia-smi through SSH
+# MAICA_MCORE_USER = ''# root
+# Password for SSH login
+# MAICA_MCORE_PWD = ''# 123456
+# Name of MFocus deployment device
+# MAICA_MFOCUS_NODE = ''# HGX610-biohazard-edition
+# Username to access nvidia-smi through SSH
+# MAICA_MFOCUS_USER = ''# root
+# Password for SSH login
+# MAICA_MFOCUS_PWD = ''# 123456
+
+
+# MTTS specified settings
+
+
+# MTTS model endpoint
+MTTS_TTS_ADDR = ''# http://172.17.0.1:80/tts
+# Rotate MTTS cache every [] hours or not
+MTTS_ROTATE_TTSCACHE = '168'
+# TTS language of reference audio
+MTTS_REF_LANG = 'en'
+# TTS text of reference audio
+MTTS_REF_TEXT = 'Now, I actually do have the perspective of the other Monika, too. And you know, honestly, the side of me that let those insults get to me is kind of frustrated.'
+# Censor TTS input or not, number for limit
+MTTS_CENSOR_QUERY = '0'
+
+
+# MTTS data exchanging endpoint settings
+
+# WebSocket and HTTP listening addresses
+MTTS_HTTP_HOST = '0.0.0.0'
+MTTS_HTTP_PORT = '7000'
+
+
+# MTTS NVWatcher settings
+
+# Name of MTTS deployment device
+# MTTS_TTS_NODE = ''
+# Username to access nvidia-smi through SSH
+# MTTS_TTS_USER = ''
+# Password for SSH login
+# MTTS_TTS_PWD = ''
+
+
+
+# These fields of MAICA are used even for deploying MTTS only:
+# MAICA_IS_REAL_ENV (fill manually)
+# MAICA_OPENAI_TIMEOUT
+# MAICA_TRUST_XFF
+# MAICA_DB_ADDR (fill manually)
+# MAICA_DB_USER (fill manually)
+# MAICA_DB_PASSWORD (fill manually)
+# MAICA_AUTH_DB (fill manually)
+# MAICA_DATA_DB (fill manually)
+# MAICA_F2B_COUNT
+# MAICA_F2B_TIME
+# MAICA_TOS_IDS
+# MAICA_FULL_RESTFUL
+# MAICA_NO_SEND_ERROR
+# MAICA_DEV_STATUS
